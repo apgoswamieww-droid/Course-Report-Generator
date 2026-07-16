@@ -1,11 +1,132 @@
 import { NextResponse } from 'next/server'
 import PizZip from 'pizzip'
-import Docxtemplater from 'docxtemplater'
 import fs from 'fs'
 import path from 'path'
 import { connectDB, CourseReport } from '@/lib/db'
+import { generateDocxBuffer } from '@/lib/generate-report'
 
 const ARRAY_FIELDS = ['civilQualification', 'militaryEducation', 'instrStaffAppt', 'postingRecord', 'familyDetails']
+
+async function saveUploadedFile(val, icNo) {
+  const baseDir = path.join(process.cwd(), 'public', 'uploads', icNo || 'unknown')
+  if (!fs.existsSync(baseDir)) fs.mkdirSync(baseDir, { recursive: true })
+  const filename = `${Date.now()}-${val.name.replace(/\s+/g, '_')}`
+  fs.writeFileSync(path.join(baseDir, filename), Buffer.from(await val.arrayBuffer()))
+  return `/uploads/${icNo || 'unknown'}/${filename}`
+}
+
+export async function GET(request) {
+  try {
+    await connectDB()
+    const { searchParams } = new URL(request.url)
+    const id = searchParams.get('id')
+
+    if (id) {
+      const report = await CourseReport.findById(id).lean()
+      if (!report) return NextResponse.json({ error: 'Not found' }, { status: 404 })
+      return NextResponse.json({ report })
+    }
+
+    const isExport = searchParams.get('export') === 'true'
+    const page = parseInt(searchParams.get('page') || '1')
+    const perPage = parseInt(searchParams.get('perPage') || '10')
+    const search = searchParams.get('search') || ''
+    const courseFilter = searchParams.get('course') || ''
+    const rankFilter = searchParams.get('rank') || ''
+    const gradingFilter = searchParams.get('grading') || ''
+
+    const filter = {}
+    if (search) {
+      filter.$or = [
+        { name: { $regex: search, $options: 'i' } },
+        { icNo: { $regex: search, $options: 'i' } },
+        { unit: { $regex: search, $options: 'i' } },
+        { corps: { $regex: search, $options: 'i' } },
+      ]
+    }
+    if (courseFilter) filter.courseName = { $regex: courseFilter, $options: 'i' }
+    if (rankFilter) filter.rank = { $regex: rankFilter, $options: 'i' }
+    if (gradingFilter) filter.grading = gradingFilter
+
+    const total = await CourseReport.countDocuments(filter)
+    let query = CourseReport.find(filter).sort({ createdAt: -1 }).lean()
+
+    if (isExport) {
+      query = query.select('-__v')
+    } else {
+      query = query
+        .skip((page - 1) * perPage)
+        .limit(perPage)
+        .select('name icNo rank unit corps courseName fromDate toDate grading courseSymbol createdAt knowledge application')
+    }
+
+    const reports = await query
+
+    if (isExport) {
+      return NextResponse.json({ reports })
+    }
+    return NextResponse.json({ reports, total, page, perPage, totalPages: Math.ceil(total / perPage) })
+  } catch (error) {
+    console.error('Error listing reports:', error)
+    return NextResponse.json({ error: 'Failed to fetch reports' }, { status: 500 })
+  }
+}
+
+export async function DELETE(request) {
+  try {
+    await connectDB()
+    const { searchParams } = new URL(request.url)
+    const id = searchParams.get('id')
+    if (!id) return NextResponse.json({ error: 'Missing id' }, { status: 400 })
+
+    const report = await CourseReport.findById(id)
+    if (!report) return NextResponse.json({ error: 'Report not found' }, { status: 404 })
+
+    const uploadDir = path.join(process.cwd(), 'public', 'uploads', report.icNo)
+    if (fs.existsSync(uploadDir)) {
+      fs.rmSync(uploadDir, { recursive: true, force: true })
+    }
+
+    await CourseReport.findByIdAndDelete(id)
+    return NextResponse.json({ success: true })
+  } catch (error) {
+    console.error('Error deleting report:', error)
+    return NextResponse.json({ error: 'Failed to delete' }, { status: 500 })
+  }
+}
+
+export async function PATCH(request) {
+  try {
+    const { searchParams } = new URL(request.url)
+    const id = searchParams.get('id')
+    if (!id) return NextResponse.json({ error: 'Missing id' }, { status: 400 })
+
+    const data = await request.formData()
+    const body = {}
+    const fileEntries = []
+
+    for (const [key, val] of data.entries()) {
+      if (ARRAY_FIELDS.includes(key)) {
+        try { body[key] = JSON.parse(val) } catch { body[key] = [] }
+      } else if (val instanceof File) {
+        fileEntries.push([key, val])
+      } else {
+        body[key] = val
+      }
+    }
+
+    for (const [key, val] of fileEntries) {
+      body[key] = await saveUploadedFile(val, body.icNo)
+    }
+
+    await connectDB()
+    await CourseReport.findByIdAndUpdate(id, body)
+    return NextResponse.json({ success: true })
+  } catch (error) {
+    console.error('Error updating report:', error)
+    return NextResponse.json({ error: 'Failed to update report' }, { status: 500 })
+  }
+}
 
 export async function POST(request) {
   try {
@@ -14,250 +135,26 @@ export async function POST(request) {
 
     for (const [key, val] of data.entries()) {
       if (ARRAY_FIELDS.includes(key)) {
-        try {
-          body[key] = JSON.parse(val)
-        } catch {
-          body[key] = []
-        }
+        try { body[key] = JSON.parse(val) } catch { body[key] = [] }
       } else if (val instanceof File) {
-        const uploadDir = path.join(process.cwd(), 'public', 'uploads')
-        if (!fs.existsSync(uploadDir)) {
-          fs.mkdirSync(uploadDir, { recursive: true })
-        }
-        const ext = path.extname(val.name) || ''
-        const filename = `${Date.now()}-${val.name.replace(/\s+/g, '_')}`
-        const filepath = path.join(uploadDir, filename)
-        const buffer = Buffer.from(await val.arrayBuffer())
-        fs.writeFileSync(filepath, buffer)
-        body[key] = `/uploads/${filename}`
+        body[key] = await saveUploadedFile(val, body.icNo)
       } else {
         body[key] = val
       }
     }
 
-    await connectDB()
-
-    const report = await CourseReport.create(body)
-
-    const templatePath = path.join(
-      process.cwd(),
-      'public',
-      '5 Course Report OPC  214.docx'
-    )
-    const templateContent = fs.readFileSync(templatePath)
-    const zip = new PizZip(templateContent)
-    const doc = new Docxtemplater(zip, {
-      paragraphLoop: true,
-      linebreaks: true,
-    })
-
-    doc.setData({
-      courseName: body.courseName || '',
-      serialNo: body.serialNo || '',
-      fromDate: body.fromDate || '',
-      toDate: body.toDate || '',
-      icNo: body.icNo || '',
-      rank: body.rank || '',
-      name: body.name || '',
-      unit: body.unit || '',
-      corps: body.corps || '',
-      lawMax: body.lawMax?.toString() || '',
-      lawObt: body.lawObt?.toString() || '',
-      lawEnforcementMax: body.lawEnforcementMax?.toString() || '',
-      lawEnforcementObt: body.lawEnforcementObt?.toString() || '',
-      trafficManagementMax: body.trafficManagementMax?.toString() || '',
-      trafficManagementObt: body.trafficManagementObt?.toString() || '',
-      investigationMax: body.investigationMax?.toString() || '',
-      investigationObt: body.investigationObt?.toString() || '',
-      caseStudyMax: body.caseStudyMax?.toString() || '',
-      caseStudyObt: body.caseStudyObt?.toString() || '',
-      thoughtProcessMax: body.thoughtProcessMax?.toString() || '',
-      thoughtProcessObt: body.thoughtProcessObt?.toString() || '',
-      militaryPaperMax: body.militaryPaperMax?.toString() || '',
-      militaryPaperObt: body.militaryPaperObt?.toString() || '',
-      militarySplMax: body.militarySplMax?.toString() || '',
-      militarySplObt: body.militarySplObt?.toString() || '',
-      coreCompetencyMax: body.coreCompetencyMax?.toString() || '',
-      coreCompetencyObt: body.coreCompetencyObt?.toString() || '',
-      weaponMax: body.weaponMax?.toString() || '',
-      weaponObt: body.weaponObt?.toString() || '',
-      mapReadingMax: body.mapReadingMax?.toString() || '',
-      mapReadingObt: body.mapReadingObt?.toString() || '',
-      practicalMax: body.practicalMax?.toString() || '',
-      practicalObt: body.practicalObt?.toString() || '',
-      theoryMax: body.theoryMax?.toString() || '',
-      theoryObt: body.theoryObt?.toString() || '',
-      totalMax: body.totalMax?.toString() || '',
-      totalObt: body.totalObt?.toString() || '',
-      knowledge: body.knowledge || '',
-      application: body.application || '',
-      instructionalAbility: body.instructionalAbility || '',
-      professionalCompetence: body.professionalCompetence || '',
-      verbalExpression: body.verbalExpression || '',
-      writtenExpression: body.writtenExpression || '',
-      cooperationTeamwork: body.cooperationTeamwork || '',
-      technicalUnderstanding: body.technicalUnderstanding || '',
-      tacticalFunctioning: body.tacticalFunctioning || '',
-      formation: body.formation || '',
-      command: body.command || '',
-      apptCmpUnit: body.apptCmpUnit || '',
-      regtCrops: body.regtCrops || '',
-      dateOfCommission: body.dateOfCommission || '',
-      dateOfSeniority: body.dateOfSeniority || '',
-      dateOfSubRanks: body.dateOfSubRanks || '',
-      dateOfSuperannuation: body.dateOfSuperannuation || '',
-      concernedMS: body.concernedMS || '',
-      dateOfBirth: body.dateOfBirth || '',
-      age: body.age || '',
-      dateOfMarriage: body.dateOfMarriage || '',
-      dateOfTOS: body.dateOfTOS || '',
-      dateOfTORS: body.dateOfTORS || '',
-      tenureCMP: body.tenureCMP || '',
-      arrivalDateCCW: body.arrivalDateCCW || '',
-      foodPreference: body.foodPreference || '',
-      admInfo: body.admInfo || '',
-      admInfoDoc: body.admInfoDoc || '',
-      movementOrder: body.movementOrder || '',
-      movementOrderDoc: body.movementOrderDoc || '',
-      lrc: body.lrc || '',
-      lrcDoc: body.lrcDoc || '',
-      willingnessCert: body.willingnessCert || '',
-      willingnessCertDoc: body.willingnessCertDoc || '',
-      medicalCert: body.medicalCert || '',
-      medicalCertDoc: body.medicalCertDoc || '',
-      nominalRoll: body.nominalRoll || '',
-      nominalRollDoc: body.nominalRollDoc || '',
-      etg: body.etg || '',
-      etgDoc: body.etgDoc || '',
-      cyberSecurityCert: body.cyberSecurityCert || '',
-      cyberSecurityCertDoc: body.cyberSecurityCertDoc || '',
-      appxFAO: body.appxFAO || '',
-      appxFAODoc: body.appxFAODoc || '',
-      teiFeedback: body.teiFeedback || '',
-      teiFeedbackDoc: body.teiFeedbackDoc || '',
-      teiFeedbackPoints: body.teiFeedbackPoints || '',
-      admFeedbackPoints: body.admFeedbackPoints || '',
-      admFeedback: body.admFeedback || '',
-      admFeedbackDoc: body.admFeedbackDoc || '',
-      mutualAssessment: body.mutualAssessment || '',
-      mutualAssessmentDoc: body.mutualAssessmentDoc || '',
-      withFamily: body.withFamily || '',
-      withFamilyDoc: body.withFamilyDoc || '',
-      departureDate: body.departureDate || '',
-      dateOfSORS: body.dateOfSORS || '',
-      jainUniversitySerNo: body.jainUniversitySerNo || '',
-      entrance: body.entrance?.toString() || '',
-      lawEnforcementTheory: body.lawEnforcementTheory?.toString() || '',
-      trafficManagementTheory: body.trafficManagementTheory?.toString() || '',
-      investigationTheory: body.investigationTheory?.toString() || '',
-      lawTheory: body.lawTheory?.toString() || '',
-      totalTheory: body.totalTheory?.toString() || '',
-      theoryPercentage: body.theoryPercentage?.toString() || '',
-      exAnushashan: body.exAnushashan?.toString() || '',
-      exKabu: body.exKabu?.toString() || '',
-      exNandi: body.exNandi?.toString() || '',
-      exMaruVijay: body.exMaruVijay?.toString() || '',
-      exKhoj: body.exKhoj?.toString() || '',
-      caseStudyTrg: body.caseStudyTrg?.toString() || '',
-      misc20: body.misc20?.toString() || '',
-      militaryPaperTrg: body.militaryPaperTrg?.toString() || '',
-      totalTrgEx: body.totalTrgEx?.toString() || '',
-      trgExPercentage: body.trgExPercentage?.toString() || '',
-      dsII: body.dsII?.toString() || '',
-      dsI: body.dsI?.toString() || '',
-      ocCCW: body.ocCCW?.toString() || '',
-      dcci: body.dcci?.toString() || '',
-      commandant: body.commandant?.toString() || '',
-      totalDS: body.totalDS?.toString() || '',
-      dsPercentage: body.dsPercentage?.toString() || '',
-      totalOverall: body.totalOverall?.toString() || '',
-      overallPercentage: body.overallPercentage?.toString() || '',
-      height: body.height?.toString() || '',
-      weight: body.weight?.toString() || '',
-      bmi: body.bmi?.toString() || '',
-      medicalCategory: body.medicalCategory || '',
-      diagnosis: body.diagnosis || '',
-      iCardNo: body.iCardNo || '',
-      warrantCardNo: body.warrantCardNo || '',
-      panCardNo: body.panCardNo || '',
-      aadhaarCardNo: body.aadhaarCardNo || '',
-      passportNo: body.passportNo || '',
-      cdaAcctNo: body.cdaAcctNo || '',
-      mobNo: body.mobNo || '',
-      emailId: body.emailId || '',
-      religion: body.religion || '',
-      bloodGroup: body.bloodGroup || '',
-      basicPay: body.basicPay || '',
-      civilQualification: Array.isArray(body.civilQualification)
-        ? body.civilQualification
-            .map(
-              (q) =>
-                `${q.srNo || ''}. ${q.qualification || ''} - ${q.boardUniversity || ''} (${q.passingYear || ''}) [${q.grading || ''}]`
-            )
-            .join('\n')
-        : '',
-      militaryEducation: Array.isArray(body.militaryEducation)
-        ? body.militaryEducation
-            .map(
-              (m) =>
-                `${m.srNo || ''}. ${m.nomenclature || ''} - ${m.institute || ''} (${m.year || ''}) [${m.gradingStd || ''}]`
-            )
-            .join('\n')
-        : '',
-      instrStaffAppt: Array.isArray(body.instrStaffAppt)
-        ? body.instrStaffAppt
-            .map(
-              (a) =>
-                `${a.srNo || ''}. ${a.typeOfInstrAppointment || ''} - ${a.institute || ''} (${a.duration || ''})`
-            )
-            .join('\n')
-        : '',
-      postingRecord: Array.isArray(body.postingRecord)
-        ? body.postingRecord
-            .map(
-              (p) =>
-                `${p.srNo || ''}. ${p.unitName || ''} (${p.typeOfUnit || ''}) - ${p.duration || ''}${p.specialAchievement ? ` [${p.specialAchievement}]` : ''}`
-            )
-            .join('\n')
-        : '',
-      familyDetails: Array.isArray(body.familyDetails)
-        ? body.familyDetails
-            .map(
-              (f) =>
-                `${f.srNo || ''}. ${f.name || ''} (${f.relation || ''}) - ${f.dob || ''} | Edu: ${f.education || ''} | Occ: ${f.occupation || ''}`
-            )
-            .join('\n')
-        : '',
-      courseSymbol: body.courseSymbol || '',
-      penPicture: body.penPicture || '',
-      orderOfMerit: body.orderOfMerit || '',
-      totalOfficers: body.totalOfficers || '',
-      grading: body.grading || '',
-      remarks: body.remarks || '',
-    })
-
-    doc.render()
-
-    const buffer = doc.getZip().generate({
-      type: 'nodebuffer',
-      compression: 'DEFLATE',
-    })
-
+    const buffer = generateDocxBuffer(body)
     const filename = `Report_${body.icNo || 'draft'}.docx`
 
     return new NextResponse(buffer, {
       status: 200,
       headers: {
-        'Content-Type':
-          'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+        'Content-Type': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
         'Content-Disposition': `attachment; filename="${filename}"`,
       },
     })
   } catch (error) {
     console.error('Error generating report:', error)
-    return NextResponse.json(
-      { error: 'Failed to generate report' },
-      { status: 500 }
-    )
+    return NextResponse.json({ error: 'Failed to generate report' }, { status: 500 })
   }
 }
