@@ -1,19 +1,10 @@
 import { NextResponse } from 'next/server'
 import PizZip from 'pizzip'
-import fs from 'fs'
-import path from 'path'
 import { connectDB, CourseReport } from '@/lib/db'
 import { generateDocxBuffer } from '@/lib/generate-report'
+import { uploadFile, deleteFileByUrl } from '@/lib/cloudinary'
 
 const ARRAY_FIELDS = ['civilQualification', 'militaryEducation', 'instrStaffAppt', 'postingRecord', 'familyDetails']
-
-async function saveUploadedFile(val, icNo) {
-  const baseDir = path.join(process.cwd(), 'public', 'uploads', icNo || 'unknown')
-  if (!fs.existsSync(baseDir)) fs.mkdirSync(baseDir, { recursive: true })
-  const filename = `${Date.now()}-${val.name.replace(/\s+/g, '_')}`
-  fs.writeFileSync(path.join(baseDir, filename), Buffer.from(await val.arrayBuffer()))
-  return `/uploads/${icNo || 'unknown'}/${filename}`
-}
 
 export async function GET(request) {
   try {
@@ -79,12 +70,12 @@ export async function DELETE(request) {
     const id = searchParams.get('id')
     if (!id) return NextResponse.json({ error: 'Missing id' }, { status: 400 })
 
-    const report = await CourseReport.findById(id)
+    const report = await CourseReport.findById(id).lean()
     if (!report) return NextResponse.json({ error: 'Report not found' }, { status: 404 })
 
-    const uploadDir = path.join(process.cwd(), 'public', 'uploads', report.icNo)
-    if (fs.existsSync(uploadDir)) {
-      fs.rmSync(uploadDir, { recursive: true, force: true })
+    const fileFields = ['admInfoDoc', 'movementOrderDoc', 'lrcDoc', 'willingnessCertDoc', 'medicalCertDoc', 'nominalRollDoc', 'etgDoc', 'cyberSecurityCertDoc', 'appxFAODoc', 'teiFeedbackDoc', 'admFeedbackDoc', 'mutualAssessmentDoc', 'withFamilyDoc']
+    for (const field of fileFields) {
+      if (report[field]) await deleteFileByUrl(report[field])
     }
 
     await CourseReport.findByIdAndDelete(id)
@@ -116,7 +107,7 @@ export async function PATCH(request) {
     }
 
     for (const [key, val] of fileEntries) {
-      body[key] = await saveUploadedFile(val, body.icNo)
+      body[key] = await uploadFile(val)
     }
 
     await connectDB()
@@ -137,7 +128,7 @@ export async function POST(request) {
       if (ARRAY_FIELDS.includes(key)) {
         try { body[key] = JSON.parse(val) } catch { body[key] = [] }
       } else if (val instanceof File) {
-        body[key] = await saveUploadedFile(val, body.icNo)
+        body[key] = await uploadFile(val)
       } else {
         body[key] = val
       }

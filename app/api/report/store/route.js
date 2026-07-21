@@ -1,7 +1,6 @@
 import { NextResponse } from 'next/server'
-import fs from 'fs'
-import path from 'path'
 import { connectDB, CourseReport } from '@/lib/db'
+import { uploadFile } from '@/lib/cloudinary'
 
 const ARRAY_FIELDS = ['civilQualification', 'militaryEducation', 'instrStaffAppt', 'postingRecord', 'familyDetails']
 
@@ -22,12 +21,7 @@ export async function POST(request) {
     }
 
     for (const [key, val] of fileEntries) {
-      const icNo = body.icNo || 'unknown'
-      const baseDir = path.join(process.cwd(), 'public', 'uploads', icNo)
-      if (!fs.existsSync(baseDir)) fs.mkdirSync(baseDir, { recursive: true })
-      const filename = `${Date.now()}-${val.name.replace(/\s+/g, '_')}`
-      fs.writeFileSync(path.join(baseDir, filename), Buffer.from(await val.arrayBuffer()))
-      body[key] = `/uploads/${icNo}/${filename}`
+      body[key] = await uploadFile(val)
     }
 
     await connectDB()
@@ -35,6 +29,6 @@ export async function POST(request) {
     return NextResponse.json({ success: true })
   } catch (error) {
     console.error('Error storing report:', error)
-    return NextResponse.json({ error: 'Failed to store report' }, { status: 500 })
+    return NextResponse.json({ error: error.message || 'Failed to store report' }, { status: 500 })
   }
 }
