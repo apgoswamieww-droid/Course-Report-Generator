@@ -59,7 +59,7 @@ export async function GET(request) {
     return NextResponse.json({ reports, total, page, perPage, totalPages: Math.ceil(total / perPage) })
   } catch (error) {
     console.error('Error listing reports:', error)
-    return NextResponse.json({ error: 'Failed to fetch reports' }, { status: 500 })
+    return NextResponse.json({ error: error.message || 'Failed to fetch reports' }, { status: 500 })
   }
 }
 
@@ -82,7 +82,7 @@ export async function DELETE(request) {
     return NextResponse.json({ success: true })
   } catch (error) {
     console.error('Error deleting report:', error)
-    return NextResponse.json({ error: 'Failed to delete' }, { status: 500 })
+    return NextResponse.json({ error: error.message || 'Failed to delete' }, { status: 500 })
   }
 }
 
@@ -115,7 +115,7 @@ export async function PATCH(request) {
     return NextResponse.json({ success: true })
   } catch (error) {
     console.error('Error updating report:', error)
-    return NextResponse.json({ error: 'Failed to update report' }, { status: 500 })
+    return NextResponse.json({ error: error.message || 'Failed to update report' }, { status: 500 })
   }
 }
 
@@ -146,6 +146,6 @@ export async function POST(request) {
     })
   } catch (error) {
     console.error('Error generating report:', error)
-    return NextResponse.json({ error: 'Failed to generate report' }, { status: 500 })
+    return NextResponse.json({ error: error.message || 'Failed to generate report' }, { status: 500 })
   }
 }
